@@ -14,6 +14,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+DATA_DIR = PROJECT_ROOT / "data"
+CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints_code_lm"
+DEFAULT_TRAIN_PATH = DATA_DIR / "python100k_train.json"
+DEFAULT_VAL_PATH = DATA_DIR / "python50k_eval.json"
+
 
 ############################################################
 # SPECIAL TOKENS
@@ -40,8 +46,8 @@ COMPLETION_ID = 5
 
 @dataclass
 class Config:
-    train_path: str = "/content/drive/MyDrive/python100k_train.json"
-    val_path: Optional[str] = "/content/drive/MyDrive/python50k_eval.json"
+    train_path: str = str(DEFAULT_TRAIN_PATH)
+    val_path: Optional[str] = str(DEFAULT_VAL_PATH)
 
     seq_len: int = 1024
 
@@ -74,7 +80,7 @@ class Config:
     normalize_numbers: bool = False
     max_string_length: int = 120
 
-    checkpoint_dir: str = "/content/drive/MyDrive/checkpoints_code_lm"
+    checkpoint_dir: str = str(CHECKPOINT_DIR)
     resume_from: Optional[str] = None
     compile_model: bool = False
 
@@ -103,6 +109,44 @@ class Config:
 
 
 CFG = Config()
+
+
+def normalize_config_paths(cfg: Config) -> Config:
+    """
+    Keeps older checkpoints usable after reorganizing the project layout.
+    """
+    path_aliases = {
+        "python100k_train.json": DEFAULT_TRAIN_PATH,
+        "python50k_eval.json": DEFAULT_VAL_PATH,
+        "best.pt": CHECKPOINT_DIR / "best.pt",
+        "last.pt": CHECKPOINT_DIR / "last.pt",
+    }
+
+    def normalize_path(raw_path: Optional[str], default_path: Optional[Path] = None) -> Optional[str]:
+        if raw_path is None:
+            return str(default_path) if default_path is not None else None
+
+        path = Path(raw_path)
+        if path.is_absolute() and path.exists():
+            return str(path)
+
+        alias = path_aliases.get(path.name)
+        if alias is not None:
+            return str(alias)
+
+        project_relative = PROJECT_ROOT / path
+        if project_relative.exists():
+            return str(project_relative)
+
+        if default_path is not None:
+            return str(default_path)
+        return str(path)
+
+    cfg.train_path = normalize_path(cfg.train_path, DEFAULT_TRAIN_PATH)
+    cfg.val_path = normalize_path(cfg.val_path, DEFAULT_VAL_PATH)
+    cfg.checkpoint_dir = normalize_path(cfg.checkpoint_dir, CHECKPOINT_DIR)
+    cfg.resume_from = normalize_path(cfg.resume_from) if cfg.resume_from else None
+    return cfg
 
 
 ############################################################
@@ -1042,6 +1086,7 @@ def load_model_for_inference(
         cfg = Config(**saved_cfg)
     else:
         cfg = CFG
+    cfg = normalize_config_paths(cfg)
 
     vocab = ckpt["vocab"]
     ivocab = ckpt["ivocab"]
@@ -1085,6 +1130,7 @@ def complete_code(
 ############################################################
 
 def train(cfg: Config):
+    cfg = normalize_config_paths(cfg)
     set_seed(cfg.seed)
     ensure_dir(cfg.checkpoint_dir)
 

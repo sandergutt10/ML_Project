@@ -14,6 +14,34 @@ importlib.reload(parse_python)
 from parse_python import continue_real_code_safe
 
 
+SAMPLE_GROUPS = {
+    "Simple Inline Cases": [
+        ("return_simple", "def add(a, b):\n    return "),
+        ("return_branch", "def fact(n):\n    if n <= 1:\n        return 1\n    return "),
+        ("return_bool", "def is_even(x):\n    if x % 2 == 0:\n        return "),
+        ("call_print", "def greet(name):\n    message = f'Hello, {name}'\n    print("),
+        ("dict_get", "data = {'a': 1, 'b': 2}\nvalue = data.get("),
+        ("attribute_access", "import math\n\ndef area(r):\n    return math."),
+        ("string_split", "text = 'hello world'\nparts = text.split("),
+    ],
+    "Indented Blocks": [
+        ("with_return", "def read_text(path):\n    with open(path, 'r', encoding='utf8') as f:\n        return "),
+        ("for_body", "numbers = [1, 2, 3]\nfor x in numbers:\n    "),
+        ("list_comp_filter", "items = [1, 2, 3]\nresult = [x * 2 for x in items if "),
+        ("append_call", "def square_all(xs):\n    out = []\n    for x in xs:\n        out.append("),
+        ("except_clause", "def safe_div(a, b):\n    try:\n        return a / b\n    except "),
+        ("method_attr", "class User:\n    def __init__(self, name):\n        self.name = name\n        self."),
+        ("binary_update", "class Counter:\n    def inc(self):\n        self.value = self.value + "),
+    ],
+    "Expressions And Literals": [
+        ("dict_literal", "def make_user(name, age):\n    return {'name': name, 'age': "),
+        ("startswith_call", "def starts_with_a(s):\n    return s.startswith("),
+        ("normalize_comp", "def normalize(items):\n    return [x.strip().lower() for x in "),
+        ("fstring_expr", "def build_message(name):\n    return f'Hello, {"),
+    ],
+}
+
+
 class Tee:
     def __init__(self, *streams):
         self.streams = streams
@@ -52,8 +80,8 @@ def print_case_result(title: str, sample_name: str, index: int, code: str, resul
     print("\n[ERROR]")
     print(result.get("error"))
 
-    print("\n[GENERATED FULL CODE]")
-    print(result.get("generated_code") or "<EMPTY>")
+    print("\n[FULL RECONSTRUCTED CODE]")
+    print(result.get("full_generated_code") or "<EMPTY>")
 
     print("\n[GENERATED COMPLETION]")
     print(result.get("generated_completion_text") or "<EMPTY>")
@@ -101,13 +129,14 @@ def main() -> None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = log_dir / f"tests_{timestamp}.log"
 
-    checkpoint_path = project_dir / "best.pt"
+    checkpoint_path = project_dir / "checkpoints_code_lm" / "best.pt"
     device = "cuda" if MLCode.torch.cuda.is_available() else "cpu"
 
     model, vocab, ivocab, cfg = MLCode.load_model_for_inference(
         checkpoint_path=str(checkpoint_path),
         device=device,
     )
+    MLCode.set_seed(getattr(cfg, "seed", 42))
 
     set_if_present(cfg, "infer_allow_incomplete_prefix", True)
     set_if_present(cfg, "infer_temperature", 0.2)
@@ -117,33 +146,6 @@ def main() -> None:
     set_if_present(cfg, "infer_max_new_tokens", 96)
 
     tokenizer = build_tokenizer(cfg)
-
-    sample_groups = {
-        "Simple Inline Cases": [
-            ("return_simple", "def add(a, b):\n    return "),
-            ("return_branch", "def fact(n):\n    if n <= 1:\n        return 1\n    return "),
-            ("return_bool", "def is_even(x):\n    if x % 2 == 0:\n        return "),
-            ("call_print", "def greet(name):\n    message = f'Hello, {name}'\n    print("),
-            ("dict_get", "data = {'a': 1, 'b': 2}\nvalue = data.get("),
-            ("attribute_access", "import math\n\ndef area(r):\n    return math."),
-            ("string_split", "text = 'hello world'\nparts = text.split("),
-        ],
-        "Indented Blocks": [
-            ("with_return", "def read_text(path):\n    with open(path, 'r', encoding='utf8') as f:\n        return "),
-            ("for_body", "numbers = [1, 2, 3]\nfor x in numbers:\n    "),
-            ("list_comp_filter", "items = [1, 2, 3]\nresult = [x * 2 for x in items if "),
-            ("append_call", "def square_all(xs):\n    out = []\n    for x in xs:\n        out.append("),
-            ("except_clause", "def safe_div(a, b):\n    try:\n        return a / b\n    except "),
-            ("method_attr", "class User:\n    def __init__(self, name):\n        self.name = name\n        self."),
-            ("binary_update", "class Counter:\n    def inc(self):\n        self.value = self.value + "),
-        ],
-        "Expressions And Literals": [
-            ("dict_literal", "def make_user(name, age):\n    return {'name': name, 'age': "),
-            ("startswith_call", "def starts_with_a(s):\n    return s.startswith("),
-            ("normalize_comp", "def normalize(items):\n    return [x.strip().lower() for x in "),
-            ("fstring_expr", "def build_message(name):\n    return f'Hello, {"),
-        ],
-    }
 
     original_stdout = sys.stdout
     with log_path.open("w", encoding="utf-8") as log_file:
@@ -158,7 +160,7 @@ def main() -> None:
             print(f"[INFO] infer_repetition_penalty={getattr(cfg, 'infer_repetition_penalty', None)}")
             print(f"[INFO] infer_max_new_tokens={getattr(cfg, 'infer_max_new_tokens', None)}")
 
-            for group_name, samples in sample_groups.items():
+            for group_name, samples in SAMPLE_GROUPS.items():
                 run_group(group_name, samples, model, vocab, ivocab, tokenizer, cfg)
         finally:
             sys.stdout.flush()

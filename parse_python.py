@@ -1,7 +1,10 @@
 import ast
+import io
 import keyword
 import math
 import re
+import token as token_module
+import tokenize
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -28,12 +31,57 @@ TOLERANT_ATTR_HOLE = "__codex_continue_attr__"
 # CODE -> DATASET-STYLE JSON TREE
 ############################################################
 
-def parse_code_to_json_tree(code: str, filename: str = "<string>") -> List[dict]:
+def tokenize_python_code(code: str) -> List[tokenize.TokenInfo]:
+    """
+    Tokenizes Python source with the stdlib tokenizer so raw input first goes
+    through lexical analysis before we build any AST nodes.
+    """
+    reader = io.StringIO(code).readline
+    return list(tokenize.generate_tokens(reader))
+
+
+def rebuild_source_from_tokens(tokens: List[tokenize.TokenInfo]) -> str:
+    """
+    Rebuilds source code from tokenizer output. This keeps the pipeline
+    explicitly `input -> tokenize -> source -> ast.parse`.
+    """
+    significant_tokens = [
+        tok
+        for tok in tokens
+        if tok.type != token_module.ENDMARKER
+    ]
+    return tokenize.untokenize(significant_tokens)
+
+
+def tokenize_and_parse_code(
+    code: str,
+    filename: str = "<string>",
+) -> Dict[str, Any]:
+    """
+    Full frontend pipeline required by the project review:
+    raw code -> stdlib tokenize -> normalized source -> ast.parse
+    """
+    python_tokens = tokenize_python_code(code)
+    normalized_source = rebuild_source_from_tokens(python_tokens)
+    tree = ast.parse(normalized_source, filename=filename)
+    return {
+        "python_tokens": python_tokens,
+        "normalized_source": normalized_source,
+        "ast_tree": tree,
+    }
+
+
+def parse_code_to_json_tree(
+    code: str,
+    filename: str = "<string>",
+    parsed: Optional[Dict[str, Any]] = None,
+) -> List[dict]:
     """
     Python code string -> dataset-style json_tree (list[dict]).
     Structure is intentionally close to your original parser.
     """
-    tree = ast.parse(code, filename=filename)
+    parsed = parsed or tokenize_and_parse_code(code, filename=filename)
+    tree = parsed["ast_tree"]
     json_tree: List[dict] = []
 
     def gen_identifier(identifier, node_type="identifier"):
@@ -223,7 +271,8 @@ def score_real_code(model, code: str, vocab, tokenizer, cfg):
     """
     device = next(model.parameters()).device
 
-    json_tree = parse_code_to_json_tree(code)
+    parsed = tokenize_and_parse_code(code)
+    json_tree = parse_code_to_json_tree(code, parsed=parsed)
     tokens = tokenizer.linearize(json_tree)
     ids = [BOS_ID] + [vocab.get(tok, UNK_ID) for tok in tokens] + [EOS_ID]
 
@@ -262,6 +311,8 @@ def score_real_code(model, code: str, vocab, tokenizer, cfg):
     return {
         "avg_loss": avg_loss,
         "ppl": ppl,
+        "python_tokens": parsed["python_tokens"],
+        "normalized_source": parsed["normalized_source"],
         "num_json_nodes": len(json_tree),
         "num_tokens": len(tokens),
         "tokens_preview": tokens[:80],
@@ -1094,6 +1145,145 @@ def ast_tokens_to_code(tokens: List[str]) -> str:
         raise RuntimeError(f"Failed to unparse generated AST: {e}") from e
 
 
+def find_path_to_node(nodes: List[dict], target_idx: int) -> Optional[List[int]]:
+    if target_idx < 0 or target_idx >= len(nodes) or not nodes:
+        return None
+
+    def dfs(idx: int, path: List[int], visited: set[int]) -> Optional[List[int]]:
+        if idx == target_idx:
+            return path
+        if idx in visited:
+            return None
+
+        visited.add(idx)
+        for child_pos, child_idx in enumerate(nodes[idx].get("children", [])):
+            result = dfs(child_idx, path + [child_pos], visited)
+            if result is not None:
+                return result
+        return None
+
+    return dfs(0, [], set())
+
+
+def follow_child_path(nodes: List[dict], path: List[int]) -> Optional[int]:
+    if not nodes:
+        return None
+
+    idx = 0
+    for child_pos in path:
+        children = nodes[idx].get("children", [])
+        if child_pos < 0 or child_pos >= len(children):
+            return None
+        idx = children[child_pos]
+    return idx
+
+
+def clone_json_subtree(nodes: List[dict], root_idx: int) -> List[dict]:
+    if root_idx < 0 or root_idx >= len(nodes):
+        return []
+
+    cloned: List[dict] = []
+    remap: Dict[int, int] = {}
+
+    def dfs(idx: int) -> int:
+        if idx in remap:
+            return remap[idx]
+
+        new_idx = len(cloned)
+        remap[idx] = new_idx
+        node = dict(nodes[idx])
+        node.pop("children", None)
+        cloned.append(node)
+
+        children = nodes[idx].get("children", [])
+        if children:
+            cloned[new_idx]["children"] = [dfs(child_idx) for child_idx in children]
+
+        return new_idx
+
+    dfs(root_idx)
+    return cloned
+
+
+def json_subtree_to_code(nodes: List[dict], root_idx: int) -> str:
+    node = _node(nodes, root_idx)
+    if node is None:
+        return ""
+
+    if node.get("type") == "attr":
+        return _sanitize_identifier(node.get("value", "attr"), "attr")
+
+    subtree = clone_json_subtree(nodes, root_idx)
+    if not subtree:
+        return ""
+
+    py_ast = json_tree_to_python_ast(subtree)
+    py_ast = ast.fix_missing_locations(py_ast)
+    if (
+        isinstance(py_ast, ast.Module)
+        and len(py_ast.body) == 1
+        and isinstance(py_ast.body[0], ast.Expr)
+    ):
+        expr_ast = ast.Expression(body=py_ast.body[0].value)
+        expr_ast = ast.fix_missing_locations(expr_ast)
+        return ast.unparse(expr_ast).strip()
+    return ast.unparse(py_ast).strip()
+
+
+def extract_completion_from_hole_context(
+    original_tree: List[dict],
+    completed_tree: List[dict],
+    hole_idx: int,
+    hole_kind: str,
+    original_code: str,
+) -> str:
+    """
+    Extract the generated fragment by locating the same hole position inside the
+    completed tree, instead of decoding `new_tokens` without context.
+    """
+    path = find_path_to_node(original_tree, hole_idx)
+    if path is None:
+        return ""
+
+    completed_idx = follow_child_path(completed_tree, path)
+    if completed_idx is None:
+        return ""
+
+    fragment = json_subtree_to_code(completed_tree, completed_idx)
+    if not fragment:
+        return ""
+
+    closers = "".join(_find_unmatched_closers(original_code))
+
+    if hole_kind in {"inline_expr", "call_args"}:
+        return fragment + closers
+
+    if hole_kind == "attr":
+        return fragment
+
+    if hole_kind == "fstring_expr":
+        stripped = original_code.rstrip()
+        fstring_match = re.search(r"f(['\"]).*\{\s*$", stripped)
+        quote = fstring_match.group(1) if fstring_match else ""
+        return fragment + "}" + quote
+
+    return fragment
+
+
+def build_full_code_from_completion(
+    original_code: str,
+    completion_text: str,
+    full_generated_code: str,
+) -> str:
+    """
+    Preserve the user's original prefix when we know the generated fragment that
+    should be appended at the cursor position.
+    """
+    if completion_text:
+        return original_code + completion_text
+    return full_generated_code
+
+
 def extract_completion_text(original_code: str, full_generated_code: str) -> str:
     if full_generated_code.startswith(original_code):
         return full_generated_code[len(original_code):]
@@ -1379,18 +1569,28 @@ def continue_real_code(
     device = next(model.parameters()).device
 
     source_for_parse = code
-    tolerant_info = None
+    tolerant_info = prepare_tolerant_prefix(code) if allow_incomplete_prefix else None
+    parsed = None
     if allow_incomplete_prefix:
-        try:
-            json_tree = parse_code_to_json_tree(source_for_parse)
-        except SyntaxError:
-            tolerant_info = prepare_tolerant_prefix(code)
+        if tolerant_info is not None:
             source_for_parse = tolerant_info["repaired_code"] if tolerant_info is not None else make_prefix_parseable(code)
-            json_tree = parse_code_to_json_tree(source_for_parse)
+            parsed = tokenize_and_parse_code(source_for_parse)
+        else:
+            try:
+                parsed = tokenize_and_parse_code(source_for_parse)
+            except (SyntaxError, tokenize.TokenError):
+                tolerant_info = prepare_tolerant_prefix(code)
+                source_for_parse = tolerant_info["repaired_code"] if tolerant_info is not None else make_prefix_parseable(code)
+                parsed = tokenize_and_parse_code(source_for_parse)
     else:
-        json_tree = parse_code_to_json_tree(source_for_parse)
+        parsed = tokenize_and_parse_code(source_for_parse)
+
+    json_tree = parse_code_to_json_tree(source_for_parse, parsed=parsed)
+    python_tokens = parsed["python_tokens"]
+    normalized_source = parsed["normalized_source"]
 
     tokens = tokenizer.linearize(json_tree)
+    hole_idx = None
     if tolerant_info is not None:
         hole_idx = find_tolerant_hole_node_idx(
             json_tree,
@@ -1433,13 +1633,35 @@ def continue_real_code(
     ]
     completed_tokens = prefix_tokens + new_tokens
 
-    generated_code = ast_tokens_to_code(completed_tokens)
-    completion_text = extract_completion_text(code, generated_code)
+    raw_generated_code = ast_tokens_to_code(completed_tokens)
+    completed_tree = decode_linearized_tokens_to_json_tree(completed_tokens)
+    if tolerant_info is not None:
+        completion_text = ""
+        if hole_idx is not None:
+            completion_text = extract_completion_from_hole_context(
+                original_tree=json_tree,
+                completed_tree=completed_tree,
+                hole_idx=hole_idx,
+                hole_kind=tolerant_info["hole_kind"],
+                original_code=code,
+            )
+        if not completion_text:
+            completion_text = extract_completion_text(code, raw_generated_code)
+        full_generated_code = build_full_code_from_completion(
+            original_code=code,
+            completion_text=completion_text,
+            full_generated_code=raw_generated_code,
+        )
+    else:
+        full_generated_code = raw_generated_code
+        completion_text = extract_completion_text(code, full_generated_code)
 
     return {
         "input_code": code,
         "source_for_parse": source_for_parse,
+        "normalized_source": normalized_source,
         "tolerant_info": tolerant_info,
+        "python_tokens": python_tokens,
         "json_tree": json_tree,
         "original_tokens": tokens,
         "prefix_tokens": prefix_tokens,
@@ -1447,7 +1669,9 @@ def continue_real_code(
         "generated_tokens": generated_tokens,
         "new_tokens": new_tokens,
         "completed_tokens": completed_tokens,
-        "generated_code": generated_code,
+        "completed_tree": completed_tree,
+        "full_generated_code": full_generated_code,
+        "generated_code": completion_text,
         "generated_completion_text": completion_text,
     }
 
@@ -1491,6 +1715,9 @@ def continue_real_code_safe(
     except Exception as e:
         return {
             "input_code": code,
+            "source_for_parse": code,
+            "normalized_source": None,
+            "python_tokens": None,
             "json_tree": None,
             "original_tokens": None,
             "prefix_tokens": None,
@@ -1498,6 +1725,8 @@ def continue_real_code_safe(
             "generated_tokens": None,
             "new_tokens": None,
             "completed_tokens": None,
+            "completed_tree": None,
+            "full_generated_code": code if fallback_to_original else "",
             "generated_code": code if fallback_to_original else "",
             "generated_completion_text": code if fallback_to_original else "",
             "error": str(e),
