@@ -1,3 +1,5 @@
+from clearml import Task
+
 import json
 import errno
 import json
@@ -13,6 +15,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+
+task = Task.init(project_name='projectML', task_name='Train')
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
