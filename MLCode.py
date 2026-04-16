@@ -29,8 +29,8 @@ from clearml import Dataset
 train_ds = Dataset.get(dataset_project="projectML", dataset_name="python100k_train")
 val_ds = Dataset.get(dataset_project="projectML", dataset_name="python50k_eval")
 
-DEFAULT_TRAIN_PATH = Path(train_ds.get_local_copy()) / "python100k_train.json"
-DEFAULT_VAL_PATH = Path(val_ds.get_local_copy()) / "python50k_eval.json"
+DEFAULT_TRAIN_PATH = Path(train_ds.get_local_copy()) / "data" / "python100k_train.json"
+DEFAULT_VAL_PATH = Path(val_ds.get_local_copy()) / "data" / "python50k_eval.json"
 
 
 ############################################################
