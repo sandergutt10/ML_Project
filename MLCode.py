@@ -19,10 +19,18 @@ from torch.utils.data import Dataset, DataLoader
 task = Task.init(project_name='projectML', task_name='Train')
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DATA_DIR = PROJECT_ROOT / "data"
+# DATA_DIR = PROJECT_ROOT / "data"
 CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints_code_lm"
-DEFAULT_TRAIN_PATH = DATA_DIR / "python100k_train.json"
-DEFAULT_VAL_PATH = DATA_DIR / "python50k_eval.json"
+# DEFAULT_TRAIN_PATH = DATA_DIR / "python100k_train.json"
+# DEFAULT_VAL_PATH = DATA_DIR / "python50k_eval.json"
+
+from clearml import Dataset
+
+train_ds = Dataset.get(dataset_project="projectML", dataset_name="python100k_train")
+val_ds = Dataset.get(dataset_project="projectML", dataset_name="python50k_eval")
+
+DEFAULT_TRAIN_PATH = Path(train_ds.get_local_copy()) / "python100k_train.json"
+DEFAULT_VAL_PATH = Path(val_ds.get_local_copy()) / "python50k_eval.json"
 
 
 ############################################################
