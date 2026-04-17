@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 task = Task.init(project_name='projectML', task_name='Train')
-
+logger = task.get_logger()
 PROJECT_ROOT = Path(__file__).resolve().parent
 # DATA_DIR = PROJECT_ROOT / "data"
 CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints_code_lm"
@@ -1296,7 +1296,12 @@ def train(cfg: Config):
         avg_train_loss = total_train_loss / max(1, train_steps)
         train_ppl = math.exp(avg_train_loss) if avg_train_loss < 20 else float("inf")
         epoch_time = time.time() - epoch_start
+current_lr = optimizer.param_groups[0]["lr"]
 
+logger.report_scalar("loss", "train", iteration=epoch + 1, value=avg_train_loss)
+logger.report_scalar("ppl", "train", iteration=epoch + 1, value=train_ppl)
+logger.report_scalar("lr", "train", iteration=epoch + 1, value=current_lr)
+logger.report_scalar("time_sec", "train", iteration=epoch + 1, value=epoch_time)
         print(
             f"Epoch {epoch + 1}/{cfg.epochs} | "
             f"train_loss={avg_train_loss:.4f} | train_ppl={train_ppl:.2f} | "
@@ -1307,13 +1312,17 @@ def train(cfg: Config):
         avg_val_loss = None
         val_ppl = None
 
-        if val_loader is not None:
-            avg_val_loss, val_ppl = evaluate(model, val_loader, device)
-            print(
-                f"Epoch {epoch + 1}/{cfg.epochs} | "
-                f"val_loss={avg_val_loss:.4f} | "
-                f"val_ppl={val_ppl:.2f}"
-            )
+       if val_loader is not None:
+    avg_val_loss, val_ppl = evaluate(model, val_loader, device)
+
+    logger.report_scalar("loss", "val", iteration=epoch + 1, value=avg_val_loss)
+    logger.report_scalar("ppl", "val", iteration=epoch + 1, value=val_ppl)
+
+    print(
+        f"Epoch {epoch + 1}/{cfg.epochs} | "
+        f"val_loss={avg_val_loss:.4f} | "
+        f"val_ppl={val_ppl:.2f}"
+    )
 
         last_path = str(Path(cfg.checkpoint_dir) / "last.pt")
         save_checkpoint(
