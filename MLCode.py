@@ -1296,12 +1296,12 @@ def train(cfg: Config):
         avg_train_loss = total_train_loss / max(1, train_steps)
         train_ppl = math.exp(avg_train_loss) if avg_train_loss < 20 else float("inf")
         epoch_time = time.time() - epoch_start
-current_lr = optimizer.param_groups[0]["lr"]
+        current_lr = optimizer.param_groups[0]["lr"]
 
-logger.report_scalar("loss", "train", iteration=epoch + 1, value=avg_train_loss)
-logger.report_scalar("ppl", "train", iteration=epoch + 1, value=train_ppl)
-logger.report_scalar("lr", "train", iteration=epoch + 1, value=current_lr)
-logger.report_scalar("time_sec", "train", iteration=epoch + 1, value=epoch_time)
+        logger.report_scalar("loss", "train", iteration=epoch + 1, value=avg_train_loss)
+        logger.report_scalar("ppl", "train", iteration=epoch + 1, value=train_ppl)
+        logger.report_scalar("lr", "train", iteration=epoch + 1, value=current_lr)
+        logger.report_scalar("time_sec", "train", iteration=epoch + 1, value=epoch_time)
         print(
             f"Epoch {epoch + 1}/{cfg.epochs} | "
             f"train_loss={avg_train_loss:.4f} | train_ppl={train_ppl:.2f} | "
