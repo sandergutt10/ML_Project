@@ -1309,7 +1309,7 @@ def train(cfg: Config):
             f"time={epoch_time:.1f}s"
         )
 
-                avg_val_loss = None
+        avg_val_loss = None
         val_ppl = None
 
         if val_loader is not None:
