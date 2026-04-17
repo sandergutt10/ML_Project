@@ -1309,20 +1309,20 @@ def train(cfg: Config):
             f"time={epoch_time:.1f}s"
         )
 
-        avg_val_loss = None
+                avg_val_loss = None
         val_ppl = None
 
-       if val_loader is not None:
-    avg_val_loss, val_ppl = evaluate(model, val_loader, device)
+        if val_loader is not None:
+            avg_val_loss, val_ppl = evaluate(model, val_loader, device)
 
-    logger.report_scalar("loss", "val", iteration=epoch + 1, value=avg_val_loss)
-    logger.report_scalar("ppl", "val", iteration=epoch + 1, value=val_ppl)
+            logger.report_scalar("loss", "val", iteration=epoch + 1, value=avg_val_loss)
+            logger.report_scalar("ppl", "val", iteration=epoch + 1, value=val_ppl)
 
-    print(
-        f"Epoch {epoch + 1}/{cfg.epochs} | "
-        f"val_loss={avg_val_loss:.4f} | "
-        f"val_ppl={val_ppl:.2f}"
-    )
+            print(
+                f"Epoch {epoch + 1}/{cfg.epochs} | "
+                f"val_loss={avg_val_loss:.4f} | "
+                f"val_ppl={val_ppl:.2f}"
+            )
 
         last_path = str(Path(cfg.checkpoint_dir) / "last.pt")
         save_checkpoint(
