@@ -130,6 +130,11 @@ def main() -> None:
     log_path = log_dir / f"tests_{timestamp}.log"
 
     checkpoint_path = project_dir / "checkpoints_code_lm" / "best.pt"
+    if not checkpoint_path.exists():
+        print(f"[ERROR] Checkpoint not found: {checkpoint_path}")
+        print("[ERROR] Add a trained checkpoint named 'best.pt' to 'checkpoints_code_lm/' and rerun the tests.")
+        return
+
     device = "cuda" if MLCode.torch.cuda.is_available() else "cpu"
 
     model, vocab, ivocab, cfg = MLCode.load_model_for_inference(

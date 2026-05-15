@@ -1,3 +1,4 @@
 torch
-streamlit
-clearml
+flask
+# Optional: install if you want experiment tracking and dataset loading via ClearML
+# clearml

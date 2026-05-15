@@ -1,6 +1,6 @@
-from clearml import Task
-#test
-import json
+from __future__ import annotations
+
+import argparse
 import errno
 import json
 import math
@@ -16,21 +16,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-task = Task.init(project_name='projectML', task_name='Train')
-logger = task.get_logger()
+try:
+    from clearml import Dataset as ClearMLDataset
+    from clearml import Task
+except Exception:
+    ClearMLDataset = None
+    Task = None
+
 PROJECT_ROOT = Path(__file__).resolve().parent
-# DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR = PROJECT_ROOT / "data"
 CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints_code_lm"
-# DEFAULT_TRAIN_PATH = DATA_DIR / "python100k_train.json"
-# DEFAULT_VAL_PATH = DATA_DIR / "python50k_eval.json"
-
-from clearml import Dataset
-
-train_ds = Dataset.get(dataset_project="projectML", dataset_name="python100k_train")
-val_ds = Dataset.get(dataset_project="projectML", dataset_name="python50k_eval")
-
-DEFAULT_TRAIN_PATH = Path(train_ds.get_local_copy()) / "data" / "python100k_train.json"
-DEFAULT_VAL_PATH = Path(val_ds.get_local_copy()) / "data" / "python50k_eval.json"
+DEFAULT_TRAIN_PATH = DATA_DIR / "python100k_train.json"
+DEFAULT_VAL_PATH = DATA_DIR / "python50k_eval.json"
 
 
 ############################################################
@@ -67,20 +64,20 @@ class Config:
     n_heads: int = 6
     n_layers: int = 6
     ff_mult: int = 4
-    dropout: float = 0.1
+    dropout: float = 0.05
 
-    epochs: int = 10
-    batch_size: int = 8
-    accum_steps: int = 8
-    lr: float = 3e-4
-    min_lr: float = 3e-5
-    warmup_steps: int = 500
-    weight_decay: float = 0.1
-    grad_clip: float = 1.0
-    label_smoothing: float = 0.05
+    epochs: int = 12
+    batch_size: int = 4
+    accum_steps: int = 16
+    lr: float = 2e-4
+    min_lr: float = 2e-5
+    warmup_steps: int = 2500
+    weight_decay: float = 0.05
+    grad_clip: float = 0.5
+    label_smoothing: float = 0.0
     seed: int = 42
-    num_workers: int = 2
-    early_stopping_patience: int = 3
+    num_workers: int = 0
+    early_stopping_patience: int = 4
 
     min_freq: int = 2
     max_vocab_size: Optional[int] = 20000
@@ -95,12 +92,18 @@ class Config:
     checkpoint_dir: str = str(CHECKPOINT_DIR)
     resume_from: Optional[str] = None
     compile_model: bool = False
+    use_clearml: bool = False
+    clearml_project_name: str = "projectML"
+    clearml_task_name: str = "Train"
+    clearml_dataset_project: str = "projectML"
+    clearml_train_dataset_name: str = "python100k_train"
+    clearml_val_dataset_name: str = "python50k_eval"
 
     validate_json_lines: bool = True
     train_random_crop: bool = True
     eval_random_crop: bool = False
-    completion_min_prefix_len: int = 64
-    completion_max_prefix_len: int = 384
+    completion_min_prefix_len: int = 32
+    completion_max_prefix_len: int = 192
 
     gen_temperature: float = 0.8
     gen_top_k: int = 40
@@ -123,6 +126,105 @@ class Config:
 CFG = Config()
 
 
+class NullLogger:
+    def report_scalar(self, *_args, **_kwargs) -> None:
+        pass
+
+
+def init_clearml_task(cfg: Config) -> Tuple[Optional[object], object]:
+    if not cfg.use_clearml:
+        return None, NullLogger()
+
+    if Task is None:
+        print("[WARN] clearml is not installed. Continuing without ClearML logging.")
+        return None, NullLogger()
+
+    try:
+        task = Task.init(
+            project_name=cfg.clearml_project_name,
+            task_name=cfg.clearml_task_name,
+        )
+        return task, task.get_logger()
+    except Exception as exc:
+        print(f"[WARN] ClearML initialization failed: {exc}. Continuing without ClearML logging.")
+        return None, NullLogger()
+
+
+def _resolve_clearml_dataset_file(
+    cfg: Config,
+    dataset_name: str,
+    expected_filename: str,
+) -> Optional[Path]:
+    if not cfg.use_clearml or ClearMLDataset is None:
+        return None
+
+    try:
+        ds = ClearMLDataset.get(
+            dataset_project=cfg.clearml_dataset_project,
+            dataset_name=dataset_name,
+        )
+        root = Path(ds.get_local_copy())
+    except Exception as exc:
+        print(f"[WARN] Failed to fetch ClearML dataset '{dataset_name}': {exc}")
+        return None
+
+    candidates = [
+        root / expected_filename,
+        root / "data" / expected_filename,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    print(
+        f"[WARN] ClearML dataset '{dataset_name}' was downloaded to '{root}', "
+        f"but '{expected_filename}' was not found."
+    )
+    return None
+
+
+def resolve_dataset_paths(cfg: Config) -> Config:
+    train_path = Path(cfg.train_path)
+    if not train_path.exists():
+        resolved_train = _resolve_clearml_dataset_file(
+            cfg,
+            dataset_name=cfg.clearml_train_dataset_name,
+            expected_filename="python100k_train.json",
+        )
+        if resolved_train is not None:
+            cfg.train_path = str(resolved_train)
+
+    if cfg.val_path:
+        val_path = Path(cfg.val_path)
+        if not val_path.exists():
+            resolved_val = _resolve_clearml_dataset_file(
+                cfg,
+                dataset_name=cfg.clearml_val_dataset_name,
+                expected_filename="python50k_eval.json",
+            )
+            if resolved_val is not None:
+                cfg.val_path = str(resolved_val)
+
+    return cfg
+
+
+def validate_runtime_files(cfg: Config, require_val: bool = False) -> None:
+    train_path = Path(cfg.train_path)
+    if not train_path.exists():
+        raise FileNotFoundError(
+            f"Training dataset not found: {train_path}. "
+            "Place 'python100k_train.json' in the project 'data/' directory or pass --train-path."
+        )
+
+    if require_val and cfg.val_path:
+        val_path = Path(cfg.val_path)
+        if not val_path.exists():
+            raise FileNotFoundError(
+                f"Validation dataset not found: {val_path}. "
+                "Place 'python50k_eval.json' in the project 'data/' directory or pass --val-path."
+            )
+
+
 def normalize_config_paths(cfg: Config) -> Config:
     """
     Keeps older checkpoints usable after reorganizing the project layout.
@@ -137,6 +239,8 @@ def normalize_config_paths(cfg: Config) -> Config:
     def normalize_path(raw_path: Optional[str], default_path: Optional[Path] = None) -> Optional[str]:
         if raw_path is None:
             return str(default_path) if default_path is not None else None
+        if isinstance(raw_path, str) and not raw_path.strip():
+            return None
 
         path = Path(raw_path)
         if path.is_absolute() and path.exists():
@@ -555,9 +659,14 @@ class StreamingASTDataset(Dataset):
         y = torch.tensor(ids[1:], dtype=torch.long)
 
         completion_positions = (x == COMPLETION_ID).nonzero(as_tuple=False)
+
         if completion_positions.numel() > 0:
             completion_idx = completion_positions[0].item()
-            y[:completion_idx] = PAD_ID
+
+            # Keep some prompt context trainable
+            mask_until = max(0, completion_idx - 16)
+
+            y[:mask_until] = PAD_ID
         else:
             y[:] = PAD_ID
         return x, y
@@ -795,7 +904,9 @@ class WarmupCosineScheduler:
         if step < self.warmup_steps:
             return self.max_lr * step / self.warmup_steps
 
-        progress = (step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
+        decay_steps = max(1, int((self.total_steps - self.warmup_steps) * 1.2))
+
+        progress = (step - self.warmup_steps) / decay_steps
         progress = min(max(progress, 0.0), 1.0)
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         return self.min_lr + cosine * (self.max_lr - self.min_lr)
@@ -1090,8 +1201,11 @@ def load_model_for_inference(
     device: Optional[str] = None,
 ):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    checkpoint = Path(checkpoint_path)
+    if not checkpoint.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
 
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    ckpt = torch.load(checkpoint, map_location=device)
 
     saved_cfg = ckpt.get("config", None)
     if saved_cfg is not None:
@@ -1143,8 +1257,11 @@ def complete_code(
 
 def train(cfg: Config):
     cfg = normalize_config_paths(cfg)
+    cfg = resolve_dataset_paths(cfg)
+    validate_runtime_files(cfg, require_val=bool(cfg.val_path))
     set_seed(cfg.seed)
     ensure_dir(cfg.checkpoint_dir)
+    _clearml_task, logger = init_clearml_task(cfg)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     use_amp = device == "cuda"
@@ -1234,9 +1351,14 @@ def train(cfg: Config):
     updates_per_epoch = math.ceil(len(train_loader) / cfg.accum_steps)
     total_updates = cfg.epochs * updates_per_epoch
 
+    warmup_steps = cfg.warmup_steps if cfg.warmup_steps > 0 else max(1000, int(total_updates * 0.03))
+
+    print(f"[INFO] total_updates={total_updates}")
+    print(f"[INFO] warmup_steps={warmup_steps}")
+
     scheduler = WarmupCosineScheduler(
         optimizer=optimizer,
-        warmup_steps=cfg.warmup_steps,
+        warmup_steps=warmup_steps,
         total_steps=total_updates,
         max_lr=cfg.lr,
         min_lr=cfg.min_lr,
@@ -1282,6 +1404,15 @@ def train(cfg: Config):
 
             total_train_loss += loss.item() * cfg.accum_steps
             train_steps += 1
+
+            active_tokens = (y != PAD_ID).sum().item()
+
+            if batch_idx % 100 == 0:
+                print(
+                    f"[TRAIN] step={batch_idx} "
+                    f"active_tokens={active_tokens} "
+                    f"lr={optimizer.param_groups[0]['lr']:.6e}"
+                )
 
             do_step = ((batch_idx + 1) % cfg.accum_steps == 0) or ((batch_idx + 1) == len(train_loader))
             if do_step:
@@ -1437,24 +1568,48 @@ def test_code_to_code(
 ############################################################
 
 if __name__ == "__main__":
-    mode = "train"  # "train" | "infer"
+    parser = argparse.ArgumentParser(description="AST language model training and inference")
+    parser.add_argument("--mode", choices=["train", "infer"], default="train")
+    parser.add_argument("--train-path", default=CFG.train_path)
+    parser.add_argument("--val-path", default=CFG.val_path)
+    parser.add_argument("--checkpoint-dir", default=CFG.checkpoint_dir)
+    parser.add_argument("--resume-from", default=CFG.resume_from)
+    parser.add_argument("--epochs", type=int, default=CFG.epochs)
+    parser.add_argument("--batch-size", type=int, default=CFG.batch_size)
+    parser.add_argument("--accum-steps", type=int, default=CFG.accum_steps)
+    parser.add_argument("--seq-len", type=int, default=CFG.seq_len)
+    parser.add_argument("--num-workers", type=int, default=CFG.num_workers)
+    parser.add_argument("--lr", type=float, default=CFG.lr)
+    parser.add_argument("--min-lr", type=float, default=CFG.min_lr)
+    parser.add_argument("--warmup-steps", type=int, default=CFG.warmup_steps)
+    parser.add_argument("--compile-model", action="store_true")
+    parser.add_argument("--use-clearml", action="store_true")
+    parser.add_argument("--sample-code", default="def add(a, b):\n    return a + b")
+    parser.add_argument("--checkpoint-path", default="")
+    args = parser.parse_args()
 
-    if mode == "train":
-        model, vocab, ivocab = train(CFG)
-        test_ast_tokens(model, vocab, ivocab, CFG)
+    cfg = Config(**asdict(CFG))
+    cfg.train_path = args.train_path
+    cfg.val_path = args.val_path
+    cfg.checkpoint_dir = args.checkpoint_dir
+    cfg.resume_from = args.resume_from
+    cfg.epochs = args.epochs
+    cfg.batch_size = args.batch_size
+    cfg.accum_steps = args.accum_steps
+    cfg.seq_len = args.seq_len
+    cfg.num_workers = args.num_workers
+    cfg.lr = args.lr
+    cfg.min_lr = args.min_lr
+    cfg.warmup_steps = args.warmup_steps
+    cfg.compile_model = args.compile_model
+    cfg.use_clearml = args.use_clearml
 
-    elif mode == "infer":
-        checkpoint_path = CFG.resume_from or str(Path(CFG.checkpoint_dir) / "best.pt")
-
-        sample_code = """
-def add(a, b):
-    return a + b
-""".strip()
-
-        if Path(checkpoint_path).exists():
-            test_code_to_code(
-                checkpoint_path=checkpoint_path,
-                sample_code=sample_code,
-            )
-        else:
-            print(f"[WARN] Checkpoint not found: {checkpoint_path}")
+    if args.mode == "train":
+        model, vocab, ivocab = train(cfg)
+        test_ast_tokens(model, vocab, ivocab, cfg)
+    else:
+        checkpoint_path = args.checkpoint_path or cfg.resume_from or str(Path(cfg.checkpoint_dir) / "best.pt")
+        test_code_to_code(
+            checkpoint_path=checkpoint_path,
+            sample_code=args.sample_code,
+        )
